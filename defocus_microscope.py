@@ -43,9 +43,11 @@ class DefocusMicroscope:
         self.face_config = self._setup_face_geometry()
         
         # Field of view in object space (microns)
-        self.fov_x = sensor_size[0] * pixel_size / magnification
-        self.fov_y = sensor_size[1] * pixel_size / magnification
-        
+        #self.fov_x = sensor_size[0] * pixel_size / magnification
+        #self.fov_y = sensor_size[1] * pixel_size / magnification
+        self.fov_x = sensor_size[0]
+        self.fov_y = sensor_size[1]
+
         # Physical volume dimensions
         self.volume_extent = volume_size * voxel_size  # microns
         
@@ -140,6 +142,7 @@ class DefocusMicroscope:
         # Use quadrature sum (sqrt of sum of squares)
         total_sigma = np.sqrt(self.min_sigma_pixels**2 + (coc_radius_pixels / 2.355)**2)
         
+        return np.ones_like(total_sigma)
         return total_sigma
     
     def filter_photons_by_face(self, positions_np, intensities_np, entered_np, exited_np):

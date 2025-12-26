@@ -108,8 +108,8 @@ class Simulation:
                             n: ti.i32):
         for i in range(n):
             intensities[i] = 0.01
-            entered[i] = 1
-            exited[i] = 1
+            entered[i] = 0
+            exited[i] = 0
             bounces[i] = 0
             for j in ti.static(range(3)):
                 last_scatter_pos[i, j] = 0.0
@@ -128,38 +128,42 @@ class Simulation:
     @ti.kernel
     def _propagate_photons(self, positions: ti.types.ndarray(),
                             directions: ti.types.ndarray(),
+                            exited: ti.types.ndarray(),
                             step: ti.f32):
         for i in range(positions.shape[0]):
-            for j in ti.static(range(3)):
-                positions[i, j] += directions[i, j] * step
+            if exited[i] == 0:
+                for j in ti.static(range(3)):
+                    positions[i, j] += directions[i, j] * step
 
     @ti.kernel
     def _propagate_photons_with_tracking(self, positions: ti.types.ndarray(),
                                         directions: ti.types.ndarray(),
+                                        exited: ti.types.ndarray(),
                                         trajectory_positions: ti.types.ndarray(),
                                         trajectory_valid: ti.types.ndarray(),
                                         step_idx: ti.i32,
                                         n_tracked: ti.i32,
                                         step: ti.f32):
         for i in range(positions.shape[0]):
-            if i < n_tracked:
-                for k in ti.static(range(3)):
-                    trajectory_positions[i, step_idx, k] = positions[i, k]
-                trajectory_valid[i, step_idx] = 1
+            if exited[i] == 0:
+                if i < n_tracked:
+                    for k in ti.static(range(3)):
+                        trajectory_positions[i, step_idx, k] = positions[i, k]
+                    trajectory_valid[i, step_idx] = 1
 
-            for j in ti.static(range(3)):
-                positions[i, j] += directions[i, j] * step
+                for j in ti.static(range(3)):
+                    positions[i, j] += directions[i, j] * step
 
     def propagate_photons(self, step: float):
         if self.tracking:
             self._propagate_photons_with_tracking(
-                self.positions, self.directions,
+                self.positions, self.directions, self.exited,
                 self.trajectory_positions, self.trajectory_valid,
                 self.step_idx, self.n_tracked, step
             )
             self.step_idx += 1
         else:
-            self._propagate_photons(self.positions, self.directions, step)
+            self._propagate_photons(self.positions, self.directions, self.exited, step)
 
 
     @ti.kernel
@@ -191,7 +195,7 @@ class Simulation:
                         interactions[x, y, z] += intensities[i]
                         intensities[i] = 0
 
-                    elif rand < 0.01 * volume[x, y, z]:
+                    elif rand < 0.05 * volume[x, y, z]:
                         phi = 2*3.14159265359*ti.random()
                         u = 2*ti.random()-1
                         directions[i, 0] = ti.sqrt(1-u*u) * ti.cos(phi)
@@ -207,7 +211,6 @@ class Simulation:
                     if x < 0 or x >= N or y < 0 or y >= N or z < 0 or z >= N:
                         exited[i] = 1
                         entered[i] = 0
-
                         if z < N:
                             x_clamped = ti.max(0, ti.min(N-1, x))
                             y_clamped = ti.max(0, ti.min(N-1, y))
@@ -234,14 +237,17 @@ class Simulation:
     def get_exits(self):
         return self.out.to_numpy()
 
-    def init_microscope(self, observation_face, volume_size, voxel_size, NA, magnification, sensor_size, focal_depth):
+    def init_microscope(self, observation_face, volume_size, voxel_size, NA, magnification, n_medium, sensor_size, pixel_size, wavelength, focal_depth):
         self.microscopes.append(DefocusMicroscope(
             observation_face=observation_face,
             volume_size=volume_size,
             voxel_size=voxel_size,
             NA = NA,
             magnification=magnification,
+            n_medium=n_medium,
             sensor_size=sensor_size,
+            pixel_size=pixel_size,
+            wavelength=wavelength,
             focal_depth=focal_depth
         ))
 
