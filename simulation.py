@@ -258,10 +258,35 @@ class Simulation:
         self.entered_np = self.entered.to_numpy()
         self.exited_np = self.exited.to_numpy()
         self.last_scatter_pos_np = self.last_scatter_pos.to_numpy()
+        self.bounces_np = self.bounces.to_numpy()
+        if self.tracking:
+            self.trajectory_positions_np = self.trajectory_positions.to_numpy()
+            self.trajectory_valid_np = self.trajectory_valid.to_numpy()
+
+    def tracking_lines(self):
+        lines = []
+        for i in range(self.n_tracked):
+            valid_steps = np.where(self.trajectory_valid_np[i] == 1)[0]
+
+            if len(valid_steps) > 1:
+                path = self.trajectory_positions_np[i, valid_steps, :]
+
+                for i in range(len(path) - 1):
+                    p1 = path[i]
+                    p2 = path[i+1]
+
+                    p1_in = np.all((p1 >= 0) & (p1 <= self.N))
+                    p2_in = np.all((p2 >= 0) & (p2 <= self.N))
+
+                    if p1_in and p2_in:
+                        line = np.array([p1, p2])
+                        lines.append(line)
+
+        return lines
 
     def defocus_image(self, i):
         return self.microscopes[i].form_image_with_defocus(
             self.positions_np, self.directions_np, self.intensities_np,
-            self.entered_np, self.exited_np, self.last_scatter_pos_np
+            self.entered_np, self.exited_np, self.last_scatter_pos_np, self.bounces_np
         )
 

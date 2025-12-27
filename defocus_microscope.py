@@ -114,35 +114,37 @@ class DefocusMicroscope:
         }
         return configs[self.observation_face]
     
-    def calculate_defocus_sigma(self, scatter_depths, exit_depths):
+    def calculate_defocus_sigma(self, scatter_depths, exit_depths, bounces):
         """
         Calculate defocus blur (sigma) based on distance from focal plane.
-        
+
         Args:
             scatter_depths: Depth coordinate of last scatter position (voxels)
             exit_depths: Depth coordinate of exit position (voxels)
-            
+            bounces: Number of scattering events for each photon
+
         Returns:
             sigma in pixels for each photon
         """
-        # For photons that never scattered (scatter_depth == 0), use exit depth
-        # This makes unscattered photons appear in focus at the observation plane
-        effective_depths = np.where(scatter_depths == 0, exit_depths, scatter_depths)
-        
+        # For photons that never scattered (bounces == 0), use minimum sigma (in-focus)
+        # For scattered photons, calculate defocus based on scatter position
+
         # Distance from focal plane (in voxels)
-        defocus_distance = np.abs(effective_depths - self.focal_depth)
-        
+        defocus_distance = np.abs(scatter_depths - self.focal_depth)
+
         # Geometric blur increases linearly with defocus distance
         # Circle of confusion radius = defocus * tan(acceptance_angle)
         coc_radius_voxels = defocus_distance * np.tan(self.acceptance_angle)
         coc_radius_microns = coc_radius_voxels * self.voxel_size
         coc_radius_pixels = coc_radius_microns * self.magnification / self.pixel_size
-        
+
         # Total blur is combination of diffraction (min_sigma) and defocus
         # Use quadrature sum (sqrt of sum of squares)
         total_sigma = np.sqrt(self.min_sigma_pixels**2 + (coc_radius_pixels / 2.355)**2)
-        
-        return np.ones_like(total_sigma)
+
+        # For unscattered photons (bounces == 0), force minimum sigma
+        total_sigma = np.where(bounces == 0, self.min_sigma_pixels, total_sigma)
+
         return total_sigma
     
     def filter_photons_by_face(self, positions_np, intensities_np, entered_np, exited_np):
@@ -176,64 +178,70 @@ class DefocusMicroscope:
         result_mask[mask] = within_na
         return result_mask
     
-    def form_image_with_defocus(self, positions_np, directions_np, intensities_np, 
-                                 entered_np, exited_np, last_scatter_pos_np):
+    def form_image_with_defocus(self, positions_np, directions_np, intensities_np,
+                                 entered_np, exited_np, last_scatter_pos_np, bounces_np):
         """
         Form microscope image with depth-dependent defocus blur.
         Each photon is rendered as a Gaussian splat.
-        
+
         Args:
             last_scatter_pos_np: Position where each photon last scattered (n_photons, 3)
+            bounces_np: Number of scattering events for each photon (n_photons,)
         """
         # Step 1: Filter by face
         face_mask = self.filter_photons_by_face(
             positions_np, intensities_np, entered_np, exited_np
         )
-        
+
         # Step 2: Filter by NA
         na_mask = self.filter_by_na(directions_np, face_mask)
-        
+
         n_accepted = na_mask.sum()
         if n_accepted == 0:
             print(f"Warning: No photons accepted for face {self.observation_face}")
             return np.zeros(self.sensor_size)
-        
+
         # Step 3: Get data for accepted photons
         config = self.face_config
         tangent_coords = config['tangent_coords']
         depth_coord = config['depth_coord']
-        
+
         # Exit positions in microns
         exit_pos = positions_np[na_mask] * self.voxel_size
         scatter_pos = last_scatter_pos_np[na_mask]
         weights = intensities_np[na_mask]
-        
+        bounces = bounces_np[na_mask]
+        print(min(bounces))
+
         # Project to sensor coordinates
         x_obj = exit_pos[:, tangent_coords[0]]
         y_obj = exit_pos[:, tangent_coords[1]]
-        
-        sensor_x = x_obj * self.magnification / self.pixel_size + self.sensor_size[0] / 2
-        sensor_y = y_obj * self.magnification / self.pixel_size + self.sensor_size[1] / 2
-        
+
+        #sensor_x = x_obj * self.magnification / self.pixel_size + self.sensor_size[0] / 2
+        #sensor_y = y_obj * self.magnification / self.pixel_size + self.sensor_size[1] / 2
+
+        sensor_x = x_obj
+        sensor_y = y_obj
+
         # Get scatter depths and exit depths
         scatter_depths = scatter_pos[:, depth_coord]
         exit_depths = positions_np[na_mask, depth_coord]
-        
-        # Calculate per-photon sigma (accounting for unscattered photons)
-        sigmas = self.calculate_defocus_sigma(scatter_depths, exit_depths)
-        
+
+        # Calculate per-photon sigma (accounting for unscattered photons via bounces)
+        sigmas = self.calculate_defocus_sigma(scatter_depths, exit_depths, bounces)
+
         # Render each photon as a Gaussian
         image = self._render_gaussian_photons(sensor_x, sensor_y, weights, sigmas)
-        
+
         # Count unscattered photons
-        n_unscattered = (scatter_depths == 0).sum()
-        
+        n_unscattered = (bounces == 0).sum()
+
         print(f"Face {self.observation_face}: {face_mask.sum()} photons at face, "
               f"{n_accepted} within NA")
         print(f"  Unscattered photons: {n_unscattered} ({100*n_unscattered/n_accepted:.1f}%)")
         print(f"  Sigma range: [{sigmas.min():.2f}, {sigmas.max():.2f}] pixels")
         print(f"  Peak intensity: {image.max():.2e}")
-        
+
         return image.T
     
     def _render_gaussian_photons(self, sensor_x, sensor_y, weights, sigmas):
@@ -287,4 +295,4 @@ class DefocusMicroscope:
                 
                 image[x_start:x_end, y_start:y_end] += bin_w[i] * kernel
         
-        return image
+        return image.T
