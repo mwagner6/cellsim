@@ -5,6 +5,7 @@ from typing import Tuple
 from beamgen import EllipticalBeamGenerator
 from defocus_microscope import DefocusMicroscope
 from helpers import init_trajectories
+from fieldgen import VolumeGenerator
 
 @ti.data_oriented
 class Simulation:
@@ -14,6 +15,7 @@ class Simulation:
         self.volume_shape: Tuple[int, int, int] = (N, N, N)
         self.tracking = False
         self.microscopes = []
+        self.typemap = {"empty": 0}
 
         ti.init(ti.gpu)
 
@@ -22,17 +24,21 @@ class Simulation:
         self.interactions = ti.field(dtype=ti.f32, shape=self.volume_shape)
         self.out = ti.field(dtype=ti.f32, shape=self.volume_shape)
 
-    @ti.kernel
-    def place_sphere(self, cx: ti.f32, cy: ti.f32, cz: ti.f32, radius: ti.f32, radius2: ti.f32, value: ti.f32):
-        for i, j, k in ti.ndrange(self.N, self.N, self.N):
+    def init_types(self, types, scatter_prec):
+        self.spacegen = VolumeGenerator()
+        for i, type in enumerate(types):
+            self.spacegen.initType(type["p_absorb"], type["p_scatter"], type["scatter_map"], type["r_index"])
+            self.typemap[type["name"]] = i + 1
 
-            dist = (ti.Vector([float(i), float(j), float(k)]) - ti.Vector([cx, cy, cz])).norm()
-            if dist < radius and dist > radius2:
-                self.volume[i, j, k] = value
+        self.type_n = len(types) + 1
+        self.spacegen.resolveTypes(scatter_prec)
 
-    def generate_spheres(self, spheres):
-        for sphere in spheres:
-            self.place_sphere(sphere["center"][0], sphere["center"][1], sphere["center"][2], sphere["radius"], sphere["radius2"], sphere["value"])
+        self.types_ti = ti.field(dtype=ti.f32, shape=(self.type_n, 3))
+        self.scatters_ti = ti.field(dtype=ti.u16, shape=(self.type_n, scatter_prec))
+
+    def initSpheres(self, spheres):
+        spheres["types"] = [self.typemap[t] for t in spheres["types"]]
+        self.spacegen.initSpheres(spheres, self.volume, self.types_ti, self.scatters_ti, self.N)
 
     def project_volume(self, axes):
         outputs = {}
@@ -49,9 +55,30 @@ class Simulation:
                 outputs[axis] = projection[np.newaxis, :, :]
 
         return outputs
+    
+    def volume_to_np(self):
+        self.volume_np = self.volume.to_numpy()
 
-    def volume_np(self):
-        return self.volume.to_numpy()
+    def vectorize_vol(self):
+        self.vectorized_vol = np.vectorize(self.volume_np)
+
+    def absorption_np(self):
+        def absorption(m):
+            return self.types_ti[m, 0]
+        
+        return absorption(self.vectorized_vol)
+    
+    def scatter_np(self):
+        def scatter(m):
+            return self.types_ti[m, 1]
+        
+        return scatter(self.vectorized_vol)
+    
+    def refraction_np(self):
+        def refraction(m):
+            return self.types_ti[m, 2]
+        
+        return refraction(self.vectorized_vol)
 
     def init_beam_generator(self,
                             central_point,
@@ -176,6 +203,8 @@ class Simulation:
                             bounces: ti.types.ndarray(),
                             last_scatter_pos: ti.types.ndarray(),
                             volume: ti.template(),
+                            typemap: ti.template(),
+                            scattermap: ti.template(),
                             interactions: ti.template(),
                             out: ti.template(),
                             N: ti.i32):
@@ -191,11 +220,11 @@ class Simulation:
 
                     rand = ti.random()
 
-                    if rand < 0.00 * volume[x, y, z]:
+                    if rand < typemap[volume[x, y, z], 0]:
                         interactions[x, y, z] += intensities[i]
                         intensities[i] = 0
 
-                    elif rand < 0.05 * volume[x, y, z]:
+                    elif rand < typemap[volume[x, y, z], 0] + typemap[volume[x, y, z], 1]:
                         phi = 2*3.14159265359*ti.random()
                         u = 2*ti.random()-1
                         directions[i, 0] = ti.sqrt(1-u*u) * ti.cos(phi)
@@ -221,7 +250,7 @@ class Simulation:
         self._interact_photons(
             self.positions, self.directions, self.intensities,
             self.entered, self.exited, self.bounces, self.last_scatter_pos,
-            self.volume, self.interactions, self.out, self.N
+            self.volume, self.types_ti, self.scatters_ti, self.interactions, self.out, self.N
         )
 
 
