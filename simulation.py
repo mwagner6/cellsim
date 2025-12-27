@@ -20,7 +20,7 @@ class Simulation:
         ti.init(ti.gpu)
 
         # Keep volume-related as fields since they're accessed via self in kernels
-        self.volume = ti.field(dtype=ti.f32, shape=self.volume_shape)
+        self.volume = ti.field(dtype=ti.u16, shape=self.volume_shape)
         self.interactions = ti.field(dtype=ti.f32, shape=self.volume_shape)
         self.out = ti.field(dtype=ti.f32, shape=self.volume_shape)
 
@@ -37,7 +37,8 @@ class Simulation:
         self.scatters_ti = ti.field(dtype=ti.u16, shape=(self.type_n, scatter_prec))
 
     def initSpheres(self, spheres):
-        spheres["types"] = [self.typemap[t] for t in spheres["types"]]
+        for sphere in spheres:
+            sphere["types"] = [self.typemap[t] for t in sphere["types"]]
         self.spacegen.initSpheres(spheres, self.volume, self.types_ti, self.scatters_ti, self.N)
 
     def project_volume(self, axes):
@@ -58,27 +59,29 @@ class Simulation:
     
     def volume_to_np(self):
         self.volume_np = self.volume.to_numpy()
+        self.types_np = self.types_ti.to_numpy()
 
-    def vectorize_vol(self):
-        self.vectorized_vol = np.vectorize(self.volume_np)
 
     def absorption_np(self):
         def absorption(m):
-            return self.types_ti[m, 0]
-        
-        return absorption(self.vectorized_vol)
+            return self.types_np[m, 0]
+        a = np.vectorize(absorption)
+
+        return a(self.volume_np)
     
     def scatter_np(self):
         def scatter(m):
-            return self.types_ti[m, 1]
-        
-        return scatter(self.vectorized_vol)
+            return self.types_np[m, 1]
+        s = np.vectorize(scatter)
+
+        return s(self.volume_np)
     
     def refraction_np(self):
         def refraction(m):
-            return self.types_ti[m, 2]
+            return self.types_np[m, 2]
+        r = np.vectorize(refraction)
         
-        return refraction(self.vectorized_vol)
+        return r(self.volume_np)
 
     def init_beam_generator(self,
                             central_point,
@@ -219,17 +222,49 @@ class Simulation:
                         entered[i] = 1
 
                     rand = ti.random()
+                    material_type = volume[x, y, z]
 
-                    if rand < typemap[volume[x, y, z], 0]:
+                    if rand < typemap[material_type, 0]:
                         interactions[x, y, z] += intensities[i]
                         intensities[i] = 0
 
-                    elif rand < typemap[volume[x, y, z], 0] + typemap[volume[x, y, z], 1]:
-                        phi = 2*3.14159265359*ti.random()
-                        u = 2*ti.random()-1
-                        directions[i, 0] = ti.sqrt(1-u*u) * ti.cos(phi)
-                        directions[i, 1] = ti.sqrt(1-u*u) * ti.sin(phi)
-                        directions[i, 2] = u
+                    elif rand < typemap[material_type, 0] + typemap[material_type, 1]:
+                        # Sample scattering angle from scattermap
+                        scatter_idx = ti.cast(ti.random() * scattermap.shape[1], ti.i32)
+                        scatter_idx = ti.min(scatter_idx, scattermap.shape[1] - 1)  # Clamp to valid range
+
+                        # Get deflection angle from scattermap (stored as uint16, need to convert)
+                        # Assuming scattermap stores angles in some encoded format
+                        deflection_angle = ti.cast(scattermap[material_type, scatter_idx], ti.f32) * 3.14159265359 / 360 
+
+                        # Current direction vector
+                        old_dir = ti.Vector([directions[i, 0], directions[i, 1], directions[i, 2]])
+
+                        # Random azimuthal angle (rotation around the incident direction)
+                        phi = 2.0 * 3.14159265359 * ti.random()
+
+                        # Create perpendicular vectors to the incident direction
+                        # Find a vector not parallel to old_dir
+                        arbitrary = ti.Vector([0.0, 1.0, 0.0])
+                        if ti.abs(old_dir[0]) < 0.9:
+                            arbitrary = ti.Vector([1.0, 0.0, 0.0])
+
+                        # Create orthonormal basis
+                        perp1 = old_dir.cross(arbitrary).normalized()
+                        perp2 = old_dir.cross(perp1).normalized()
+
+                        # Deflect at the sampled angle, rotated randomly around the axis
+                        cos_theta = ti.cos(deflection_angle)
+                        sin_theta = ti.sin(deflection_angle)
+                        cos_phi = ti.cos(phi)
+                        sin_phi = ti.sin(phi)
+
+                        # New direction: deflect by deflection_angle, rotate by phi around old direction
+                        new_dir = cos_theta * old_dir + sin_theta * (cos_phi * perp1 + sin_phi * perp2)
+
+                        directions[i, 0] = new_dir[0]
+                        directions[i, 1] = new_dir[1]
+                        directions[i, 2] = new_dir[2]
                         bounces[i] += 1
 
                         last_scatter_pos[i, 0] = positions[i, 0]

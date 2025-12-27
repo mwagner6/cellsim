@@ -34,16 +34,16 @@ class VolumeGenerator:
 
     def initSpheres(self, spheres, map, typemap, scattermap, N):
         for sphere in spheres:
-            self._initSphere(map, N, sphere["center"][0], sphere["center"][1], sphere["center"][2], np.array(sphere["radii"]), np.array(sphere["types"]))
-        typemap.from_np(self.types_np)
-        scattermap.from_np(self.scatters_np)
+            self._initSphere(map, int(N), sphere["center"][0], sphere["center"][1], sphere["center"][2], np.array(sphere["radii"], dtype=np.float32), np.array(sphere["types"], dtype=np.uint16))
+        typemap.from_numpy(self.types_np)
+        scattermap.from_numpy(self.scatters_np)
 
     @ti.kernel
     def _initSphere(self, map: ti.template(), N: ti.i32, cx: ti.f32, cy: ti.f32, cz: ti.f32, radii: ti.types.ndarray(), types: ti.types.ndarray()):
         for i, j, k in ti.ndrange(N, N, N):
             dist = (ti.Vector([float(i), float(j), float(k)]) - ti.Vector([cx, cy, cz])).norm()
-            for i, r in enumerate(radii):
-                if dist < r:
-                    map[i, j, k] = types[i]
+            for c in range(radii.shape[0]):
+                if dist < radii[c]:
+                    map[i, j, k] = ti.cast(types[c], ti.u16)
                 else:
                     break
