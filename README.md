@@ -9,3 +9,11 @@ Simple Monte Carlo optical model for 3D cell clusters
 *   **Illumination Generator:** Sets up illumination of volume.
 *   **Optical Simulation:** Simulates photon-volume interactions.
 *   **Virtual Microscope:** Simulates light capture and imaging.
+
+```mermaid
+%%{init: {'width': 300 } }%%
+flowchart TD
+    A[Shape Gen] --> B[Volume Gen];
+    B --> C[Optical Sim];
+    D[Illumination Gen] -->C;
+    C --> E[Virtual Microscope];
