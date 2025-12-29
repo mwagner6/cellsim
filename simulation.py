@@ -10,12 +10,13 @@ from fieldgen import VolumeGenerator
 @ti.data_oriented
 class Simulation:
 
-    def __init__(self, N: int = 128):
+    def __init__(self, N: int = 128, wavelength=0.65):
         self.N: int = N
         self.volume_shape: Tuple[int, int, int] = (N, N, N)
         self.tracking = False
         self.microscopes = []
         self.typemap = {"empty": 0}
+        self.wavelength = wavelength
 
         ti.init(ti.gpu)
 
@@ -25,9 +26,9 @@ class Simulation:
         self.out = ti.field(dtype=ti.f32, shape=self.volume_shape)
 
     def init_types(self, types, scatter_prec):
-        self.spacegen = VolumeGenerator()
+        self.spacegen = VolumeGenerator(self.wavelength)
         for i, type in enumerate(types):
-            self.spacegen.initType(type["p_absorb"], type["p_scatter"], type["scatter_map"], type["r_index"])
+            self.spacegen.initType(type["rel_scale"], type["rel_density"], type["rel_pigment"], type["r_index"])
             self.typemap[type["name"]] = i + 1
 
         self.type_n = len(types) + 1
@@ -235,7 +236,7 @@ class Simulation:
 
                         # Get deflection angle from scattermap (stored as uint16, need to convert)
                         # Assuming scattermap stores angles in some encoded format
-                        deflection_angle = ti.cast(scattermap[material_type, scatter_idx], ti.f32) * 3.14159265359 / 360 
+                        deflection_angle = ti.cast(scattermap[material_type, scatter_idx], ti.f32) 
 
                         # Current direction vector
                         old_dir = ti.Vector([directions[i, 0], directions[i, 1], directions[i, 2]])

@@ -3,29 +3,47 @@ import numpy as np
 
 @ti.data_oriented
 class VolumeGenerator:
-    def __init__(self):
+    def __init__(self, wavelength):
         self.typemap = [
             {
-                "p_absorb": 0,
-                "p_scatter": 0,
-                "scatter_map": [1]*360,
-                "r_index": 1
+                "rel_density": 0,
+                "rel_scale": 1,
+                "rel_pigment": 0,
+                "r_index": 1.3333,
             }
         ]
+        self.wavelength = wavelength
+        self.A_MELANIN = 6.49E7
+        self.B_MELANIN = 3.48
 
-    def initType(self, p_absorb, p_scatter, scatter_map, r_index):
-        self.typemap.append({"p_absorb": p_absorb, "p_scatter": p_scatter, "scatter_map": scatter_map, "r_index": r_index})
+        self.A_SCAT_1UM = 0.005
+        self.B_SCAT = 1.5
+
+        self.A_ANISO_1UM = 0.90
+        self.B_ANISO = 0.05
+
+    def initType(self, rel_scale, rel_density, rel_pigment, r_index):
+        self.typemap.append({"rel_density": rel_density, "rel_scale": rel_scale, "rel_pigment": rel_pigment, "r_index": r_index})
 
     def resolveTypes(self, scatter_prec):
+        scatter_angles = 2 * np.pi * np.linspace(0, 180, scatter_prec) / 360
         self.types_np = np.ndarray((len(self.typemap), 3), dtype=np.float32)
 
         self.scatters_np = np.ndarray((len(self.typemap), scatter_prec), dtype=np.uint16)
         for i, type in enumerate(self.typemap):
-            self.types_np[i, 0] = type["p_absorb"]
-            self.types_np[i, 1] = type["p_scatter"]
+            self.types_np[i, 0] = type["rel_pigment"] * self.A_MELANIN * self.wavelength **(-self.B_MELANIN)
+            self.types_np[i, 1] = type["rel_density"] * self.A_SCAT_1UM * self.wavelength **(-self.B_SCAT)
             self.types_np[i, 2] = type["r_index"]
 
-            scatter_dist = np.random.choice(range(360), size=(scatter_prec), p=np.array(type["scatter_map"])/sum(type["scatter_map"]))
+            aniso_g = self.A_ANISO_1UM * self.wavelength **(self.B_ANISO/type["rel_scale"])
+            cos_scat = np.cos(scatter_angles)
+
+            num = 1 - aniso_g**2
+            denom = 4 * np.pi * (1 + aniso_g**2 - 2 * aniso_g * cos_scat)**1.5
+
+            scat_probs = num / denom
+
+            scatter_dist = np.random.choice(scatter_angles, size=(scatter_prec), p=(scat_probs / np.sum(scat_probs)))
             self.scatters_np[i, :] = scatter_dist
 
         self.types_ti = ti.ndarray(dtype=ti.f32, shape=(len(self.typemap), 3))
