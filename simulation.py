@@ -10,13 +10,15 @@ from fieldgen import VolumeGenerator
 @ti.data_oriented
 class Simulation:
 
-    def __init__(self, N: int = 128, wavelength=0.65):
+    def __init__(self, N: int = 128, wavelength=0.65, n_photons=100000000, batch_size=100000000):
         self.N: int = N
         self.volume_shape: Tuple[int, int, int] = (N, N, N)
         self.tracking = False
         self.microscopes = []
         self.typemap = {"empty": 0}
+        self.batchsize = batch_size
         self.wavelength = wavelength
+        self.photons_left = n_photons
 
         ti.init(ti.gpu)
 
@@ -110,6 +112,22 @@ class Simulation:
             divergence_sigma_a=divergence_sigma_a,
             divergence_sigma_b=divergence_sigma_b
         )
+
+    def simulation_loop(self, max_steps, step_length, track, n_tracked):
+        i = 0
+        while self.photons_left > 0:
+            i += 1
+            print(f"Loop {i} ({self.photons_left} photons remaining):")
+            photons_n = min(self.photons_left, self.batchsize)
+            print(f"Running {photons_n} photons")
+            self.photons_left -= photons_n
+
+            self.init_photons(photons_n)
+            if track:
+                track = False
+                self.init_tracking(n_tracked, max_steps)
+
+            self.run_simulation(max_steps, step_length)
 
     def init_photons(self, n):
         self.n_photons = n
