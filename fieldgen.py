@@ -41,7 +41,8 @@ class VolumeGenerator:
             num = 1 - aniso_g**2
             denom = 4 * np.pi * (1 + aniso_g**2 - 2 * aniso_g * cos_scat)**1.5
 
-            scat_probs = num / denom
+            scat_probs = np.log(num / denom)
+            scat_probs += np.amin(scat_probs)
 
             scatter_dist = np.random.choice(scatter_angles, size=(scatter_prec), p=(scat_probs / np.sum(scat_probs)))
             self.scatters_np[i, :] = scatter_dist

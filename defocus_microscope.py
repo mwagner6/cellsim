@@ -1,6 +1,8 @@
 import numpy as np
+import taichi as ti
 
 
+@ti.data_oriented
 class DefocusMicroscope:
     """
     Virtual microscope with depth-dependent defocus blur.
@@ -59,8 +61,8 @@ class DefocusMicroscope:
         self.dof = (wavelength / 1000) / (2 * NA**2)  # microns
         self.dof_voxels = self.dof / voxel_size  # convert to voxel units
 
-        # Initialize accumulated image (for batched simulations)
-        self.accumulated_image = np.zeros(self.sensor_size, dtype=np.float32)
+        # Initialize accumulated image as Taichi field (for batched simulations)
+        self.accumulated_image = ti.field(dtype=ti.f32, shape=self.sensor_size)
 
         print(f"Taichi Microscope with Defocus initialized:")
         print(f"  Observation face: {observation_face}")
@@ -181,9 +183,15 @@ class DefocusMicroscope:
         result_mask[mask] = within_na
         return result_mask
     
+    @ti.kernel
+    def _reset_image_kernel(self, image: ti.template()):
+        """Taichi kernel to reset image to zero."""
+        for i, j in image:
+            image[i, j] = 0.0
+
     def reset_image(self):
         """Reset the accumulated image to zero (call before starting a new simulation)."""
-        self.accumulated_image = np.zeros(self.sensor_size, dtype=np.float32)
+        self._reset_image_kernel(self.accumulated_image)
 
     def add_photons_to_image(self, positions_np, directions_np, intensities_np,
                              entered_np, exited_np, last_scatter_pos_np, bounces_np):
@@ -251,11 +259,11 @@ class DefocusMicroscope:
               f"{n_accepted} within NA")
         print(f"  Unscattered photons: {n_unscattered} ({100*n_unscattered/n_accepted:.1f}%)")
         print(f"  Sigma range: [{sigmas.min():.2f}, {sigmas.max():.2f}] pixels")
-        print(f"  Accumulated peak intensity: {self.accumulated_image.max():.2e}")
+        print(f"  Accumulated peak intensity: {self.accumulated_image.to_numpy().max():.2e}")
 
     def get_image(self):
         """Get the accumulated image."""
-        return self.accumulated_image.T
+        return self.accumulated_image.to_numpy().T
 
     def form_image_with_defocus(self, positions_np, directions_np, intensities_np,
                                  entered_np, exited_np, last_scatter_pos_np, bounces_np):
@@ -273,54 +281,89 @@ class DefocusMicroscope:
                                   entered_np, exited_np, last_scatter_pos_np, bounces_np)
         return self.get_image()
     
-    def _render_and_accumulate_photons(self, sensor_x, sensor_y, weights, sigmas):
+    @ti.kernel
+    def _render_gaussian_kernel(self,
+                                 sensor_x: ti.types.ndarray(),
+                                 sensor_y: ti.types.ndarray(),
+                                 weights: ti.types.ndarray(),
+                                 sigmas: ti.types.ndarray(),
+                                 image: ti.template(),
+                                 sensor_width: ti.i32,
+                                 sensor_height: ti.i32):
         """
-        Render photons as Gaussian splats and add them to the accumulated image.
-
-        This is the key function that implements depth-dependent blur!
+        GPU-accelerated Gaussian splatting kernel using atomic operations.
+        Each photon is rendered as a Gaussian splat in parallel.
         """
-        # For efficiency, group photons by similar sigma
-        sigma_bins = np.linspace(sigmas.min(), sigmas.max(), 50)
-        sigma_indices = np.digitize(sigmas, sigma_bins)
+        for photon_idx in range(sensor_x.shape[0]):
+            # Get photon parameters
+            cx = sensor_x[photon_idx]
+            cy = sensor_y[photon_idx]
+            weight = weights[photon_idx]
+            sigma = sigmas[photon_idx]
 
-        for bin_idx in range(len(sigma_bins) + 1):
-            mask = sigma_indices == bin_idx
-            if not mask.any():
-                continue
-
-            bin_sigma = sigmas[mask].mean()
-            bin_x = sensor_x[mask]
-            bin_y = sensor_y[mask]
-            bin_w = weights[mask]
-
-            # Create Gaussian kernel for this bin
-            kernel_radius = int(np.ceil(3 * bin_sigma))
+            # Calculate kernel radius (3 sigma covers ~99.7% of Gaussian)
+            kernel_radius = ti.cast(ti.ceil(3.0 * sigma), ti.i32)
             if kernel_radius < 1:
                 kernel_radius = 1
 
-            kernel_size = 2 * kernel_radius + 1
-            y_k, x_k = np.ogrid[-kernel_radius:kernel_radius+1, -kernel_radius:kernel_radius+1]
-            kernel = np.exp(-(x_k**2 + y_k**2) / (2 * bin_sigma**2))
-            kernel /= kernel.sum()
+            # Center pixel position
+            ix = ti.cast(ti.round(cx), ti.i32)
+            iy = ti.cast(ti.round(cy), ti.i32)
 
-            # Splat photons onto accumulated image
-            for i in range(len(bin_x)):
-                ix = int(np.round(bin_x[i]))
-                iy = int(np.round(bin_y[i]))
+            # Check if center is within bounds
+            if ix < kernel_radius or ix >= sensor_width - kernel_radius:
+                continue
+            if iy < kernel_radius or iy >= sensor_height - kernel_radius:
+                continue
 
-                # Skip if outside sensor
-                if ix < kernel_radius or ix >= self.sensor_size[0] - kernel_radius:
-                    continue
-                if iy < kernel_radius or iy >= self.sensor_size[1] - kernel_radius:
-                    continue
+            # Normalization constant for Gaussian
+            two_sigma_sq = 2.0 * sigma * sigma
 
-                # Add Gaussian splat to accumulated image
-                x_start = ix - kernel_radius
-                x_end = ix + kernel_radius + 1
-                y_start = iy - kernel_radius
-                y_end = iy + kernel_radius + 1
+            # Compute normalization factor by summing the kernel
+            # (done in separate loop to ensure correct normalization)
+            kernel_sum = 0.0
+            for dx in range(-kernel_radius, kernel_radius + 1):
+                for dy in range(-kernel_radius, kernel_radius + 1):
+                    dist_sq = ti.cast(dx * dx + dy * dy, ti.f32)
+                    kernel_sum += ti.exp(-dist_sq / two_sigma_sq)
 
-                self.accumulated_image[x_start:x_end, y_start:y_end] += bin_w[i] * kernel
+            # Splat Gaussian onto image with atomic add
+            for dx in range(-kernel_radius, kernel_radius + 1):
+                for dy in range(-kernel_radius, kernel_radius + 1):
+                    px = ix + dx
+                    py = iy + dy
+
+                    # Bounds check
+                    if 0 <= px < sensor_width and 0 <= py < sensor_height:
+                        # Compute Gaussian value
+                        dist_sq = ti.cast(dx * dx + dy * dy, ti.f32)
+                        gaussian_val = ti.exp(-dist_sq / two_sigma_sq) / kernel_sum
+
+                        # Atomic add to handle parallel writes to same pixel
+                        ti.atomic_add(image[px, py], weight * gaussian_val)
+
+    def _render_and_accumulate_photons(self, sensor_x, sensor_y, weights, sigmas):
+        """
+        Render photons as Gaussian splats and add them to the accumulated image.
+        Uses GPU-accelerated Taichi kernel with atomic operations.
+        """
+        # Convert numpy arrays to Taichi ndarrays
+        sensor_x_ti = ti.ndarray(dtype=ti.f32, shape=sensor_x.shape[0])
+        sensor_y_ti = ti.ndarray(dtype=ti.f32, shape=sensor_y.shape[0])
+        weights_ti = ti.ndarray(dtype=ti.f32, shape=weights.shape[0])
+        sigmas_ti = ti.ndarray(dtype=ti.f32, shape=sigmas.shape[0])
+
+        sensor_x_ti.from_numpy(sensor_x.astype(np.float32))
+        sensor_y_ti.from_numpy(sensor_y.astype(np.float32))
+        weights_ti.from_numpy(weights.astype(np.float32))
+        sigmas_ti.from_numpy(sigmas.astype(np.float32))
+
+        # Call GPU kernel
+        self._render_gaussian_kernel(
+            sensor_x_ti, sensor_y_ti, weights_ti, sigmas_ti,
+            self.accumulated_image,
+            self.sensor_size[0], self.sensor_size[1]
+        )
 
     def _render_gaussian_photons(self, sensor_x, sensor_y, weights, sigmas):
         """
