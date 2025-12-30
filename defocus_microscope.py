@@ -8,7 +8,7 @@ class DefocusMicroscope:
     from its last scatter position to the focal plane.
     """
     
-    def __init__(self, 
+    def __init__(self,
                  observation_face: str = '+z',
                  volume_size: int = 128,
                  voxel_size: float = 1.0,  # microns
@@ -21,7 +21,7 @@ class DefocusMicroscope:
                  focal_depth: float = 64.0):  # voxel coordinates
         """
         Initialize microscope with defocus capability.
-        
+
         Args:
             focal_depth: Depth of focal plane in voxel coordinates (e.g., 64 for center)
         """
@@ -35,13 +35,13 @@ class DefocusMicroscope:
         self.pixel_size = pixel_size
         self.wavelength = wavelength
         self.focal_depth = focal_depth
-        
+
         # Calculate acceptance angle
         self.acceptance_angle = np.arcsin(NA / n_medium)
-        
+
         # Map face to normal direction and coordinate system
         self.face_config = self._setup_face_geometry()
-        
+
         # Field of view in object space (microns)
         #self.fov_x = sensor_size[0] * pixel_size / magnification
         #self.fov_y = sensor_size[1] * pixel_size / magnification
@@ -50,15 +50,18 @@ class DefocusMicroscope:
 
         # Physical volume dimensions
         self.volume_extent = volume_size * voxel_size  # microns
-        
+
         # PSF parameters - minimum blur (in-focus)
         self.airy_radius = 0.61 * (wavelength / 1000) / NA  # microns
         self.min_sigma_pixels = (self.airy_radius * magnification / pixel_size) / 2.355
-        
+
         # Depth of field (microns)
         self.dof = (wavelength / 1000) / (2 * NA**2)  # microns
         self.dof_voxels = self.dof / voxel_size  # convert to voxel units
-        
+
+        # Initialize accumulated image (for batched simulations)
+        self.accumulated_image = np.zeros(self.sensor_size, dtype=np.float32)
+
         print(f"Taichi Microscope with Defocus initialized:")
         print(f"  Observation face: {observation_face}")
         print(f"  Focal depth: {focal_depth} voxels ({focal_depth * voxel_size:.1f} μm)")
@@ -178,13 +181,22 @@ class DefocusMicroscope:
         result_mask[mask] = within_na
         return result_mask
     
-    def form_image_with_defocus(self, positions_np, directions_np, intensities_np,
-                                 entered_np, exited_np, last_scatter_pos_np, bounces_np):
+    def reset_image(self):
+        """Reset the accumulated image to zero (call before starting a new simulation)."""
+        self.accumulated_image = np.zeros(self.sensor_size, dtype=np.float32)
+
+    def add_photons_to_image(self, positions_np, directions_np, intensities_np,
+                             entered_np, exited_np, last_scatter_pos_np, bounces_np):
         """
-        Form microscope image with depth-dependent defocus blur.
-        Each photon is rendered as a Gaussian splat.
+        Add photons from current batch to the accumulated image.
+        Each photon is rendered as a Gaussian splat and added to the accumulated image.
 
         Args:
+            positions_np: Exit positions (n_photons, 3)
+            directions_np: Exit directions (n_photons, 3)
+            intensities_np: Photon intensities (n_photons,)
+            entered_np: Whether photon entered volume (n_photons,)
+            exited_np: Whether photon exited volume (n_photons,)
             last_scatter_pos_np: Position where each photon last scattered (n_photons, 3)
             bounces_np: Number of scattering events for each photon (n_photons,)
         """
@@ -199,7 +211,7 @@ class DefocusMicroscope:
         n_accepted = na_mask.sum()
         if n_accepted == 0:
             print(f"Warning: No photons accepted for face {self.observation_face}")
-            return np.zeros(self.sensor_size)
+            return
 
         # Step 3: Get data for accepted photons
         config = self.face_config
@@ -211,7 +223,6 @@ class DefocusMicroscope:
         scatter_pos = last_scatter_pos_np[na_mask]
         weights = intensities_np[na_mask]
         bounces = bounces_np[na_mask]
-        print(min(bounces))
 
         # Project to sensor coordinates
         x_obj = exit_pos[:, tangent_coords[0]]
@@ -230,8 +241,8 @@ class DefocusMicroscope:
         # Calculate per-photon sigma (accounting for unscattered photons via bounces)
         sigmas = self.calculate_defocus_sigma(scatter_depths, exit_depths, bounces)
 
-        # Render each photon as a Gaussian
-        image = self._render_gaussian_photons(sensor_x, sensor_y, weights, sigmas)
+        # Render photons and accumulate into image
+        self._render_and_accumulate_photons(sensor_x, sensor_y, weights, sigmas)
 
         # Count unscattered photons
         n_unscattered = (bounces == 0).sum()
@@ -240,59 +251,126 @@ class DefocusMicroscope:
               f"{n_accepted} within NA")
         print(f"  Unscattered photons: {n_unscattered} ({100*n_unscattered/n_accepted:.1f}%)")
         print(f"  Sigma range: [{sigmas.min():.2f}, {sigmas.max():.2f}] pixels")
-        print(f"  Peak intensity: {image.max():.2e}")
+        print(f"  Accumulated peak intensity: {self.accumulated_image.max():.2e}")
 
-        return image.T
-    
-    def _render_gaussian_photons(self, sensor_x, sensor_y, weights, sigmas):
+    def get_image(self):
+        """Get the accumulated image."""
+        return self.accumulated_image.T
+
+    def form_image_with_defocus(self, positions_np, directions_np, intensities_np,
+                                 entered_np, exited_np, last_scatter_pos_np, bounces_np):
         """
-        Render photons as Gaussian splats.
-        
+        Form microscope image with depth-dependent defocus blur (legacy single-batch method).
+        Each photon is rendered as a Gaussian splat.
+
+        Args:
+            last_scatter_pos_np: Position where each photon last scattered (n_photons, 3)
+            bounces_np: Number of scattering events for each photon (n_photons,)
+        """
+        # Reset and render in one go
+        self.reset_image()
+        self.add_photons_to_image(positions_np, directions_np, intensities_np,
+                                  entered_np, exited_np, last_scatter_pos_np, bounces_np)
+        return self.get_image()
+    
+    def _render_and_accumulate_photons(self, sensor_x, sensor_y, weights, sigmas):
+        """
+        Render photons as Gaussian splats and add them to the accumulated image.
+
         This is the key function that implements depth-dependent blur!
         """
-        image = np.zeros(self.sensor_size, dtype=np.float32)
-        
         # For efficiency, group photons by similar sigma
         sigma_bins = np.linspace(sigmas.min(), sigmas.max(), 50)
         sigma_indices = np.digitize(sigmas, sigma_bins)
-        
+
         for bin_idx in range(len(sigma_bins) + 1):
             mask = sigma_indices == bin_idx
             if not mask.any():
                 continue
-            
+
             bin_sigma = sigmas[mask].mean()
             bin_x = sensor_x[mask]
             bin_y = sensor_y[mask]
             bin_w = weights[mask]
-            
+
             # Create Gaussian kernel for this bin
             kernel_radius = int(np.ceil(3 * bin_sigma))
             if kernel_radius < 1:
                 kernel_radius = 1
-            
+
             kernel_size = 2 * kernel_radius + 1
             y_k, x_k = np.ogrid[-kernel_radius:kernel_radius+1, -kernel_radius:kernel_radius+1]
             kernel = np.exp(-(x_k**2 + y_k**2) / (2 * bin_sigma**2))
             kernel /= kernel.sum()
-            
-            # Splat photons onto image
+
+            # Splat photons onto accumulated image
             for i in range(len(bin_x)):
                 ix = int(np.round(bin_x[i]))
                 iy = int(np.round(bin_y[i]))
-                
+
                 # Skip if outside sensor
                 if ix < kernel_radius or ix >= self.sensor_size[0] - kernel_radius:
                     continue
                 if iy < kernel_radius or iy >= self.sensor_size[1] - kernel_radius:
                     continue
-                
+
+                # Add Gaussian splat to accumulated image
+                x_start = ix - kernel_radius
+                x_end = ix + kernel_radius + 1
+                y_start = iy - kernel_radius
+                y_end = iy + kernel_radius + 1
+
+                self.accumulated_image[x_start:x_end, y_start:y_end] += bin_w[i] * kernel
+
+    def _render_gaussian_photons(self, sensor_x, sensor_y, weights, sigmas):
+        """
+        Render photons as Gaussian splats (legacy method - creates new image).
+
+        This is the key function that implements depth-dependent blur!
+        """
+        image = np.zeros(self.sensor_size, dtype=np.float32)
+
+        # For efficiency, group photons by similar sigma
+        sigma_bins = np.linspace(sigmas.min(), sigmas.max(), 50)
+        sigma_indices = np.digitize(sigmas, sigma_bins)
+
+        for bin_idx in range(len(sigma_bins) + 1):
+            mask = sigma_indices == bin_idx
+            if not mask.any():
+                continue
+
+            bin_sigma = sigmas[mask].mean()
+            bin_x = sensor_x[mask]
+            bin_y = sensor_y[mask]
+            bin_w = weights[mask]
+
+            # Create Gaussian kernel for this bin
+            kernel_radius = int(np.ceil(3 * bin_sigma))
+            if kernel_radius < 1:
+                kernel_radius = 1
+
+            kernel_size = 2 * kernel_radius + 1
+            y_k, x_k = np.ogrid[-kernel_radius:kernel_radius+1, -kernel_radius:kernel_radius+1]
+            kernel = np.exp(-(x_k**2 + y_k**2) / (2 * bin_sigma**2))
+            kernel /= kernel.sum()
+
+            # Splat photons onto image
+            for i in range(len(bin_x)):
+                ix = int(np.round(bin_x[i]))
+                iy = int(np.round(bin_y[i]))
+
+                # Skip if outside sensor
+                if ix < kernel_radius or ix >= self.sensor_size[0] - kernel_radius:
+                    continue
+                if iy < kernel_radius or iy >= self.sensor_size[1] - kernel_radius:
+                    continue
+
                 # Add Gaussian splat
                 x_start = ix - kernel_radius
                 x_end = ix + kernel_radius + 1
                 y_start = iy - kernel_radius
                 y_end = iy + kernel_radius + 1
-                
+
                 image[x_start:x_end, y_start:y_end] += bin_w[i] * kernel
-        
+
         return image.T

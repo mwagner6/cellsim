@@ -114,6 +114,14 @@ class Simulation:
         )
 
     def simulation_loop(self, max_steps, step_length, track, n_tracked):
+        """
+        Run simulation in batches to avoid VRAM overflow.
+        Microscopes must be initialized before calling this method.
+        """
+        # Reset all microscope images before starting
+        for microscope in self.microscopes:
+            microscope.reset_image()
+
         i = 0
         while self.photons_left > 0:
             i += 1
@@ -128,6 +136,17 @@ class Simulation:
                 self.init_tracking(n_tracked, max_steps)
 
             self.run_simulation(max_steps, step_length)
+
+            # Transfer photon data to CPU
+            self.to_numpy()
+
+            # Add photons to all microscope images
+            for j, microscope in enumerate(self.microscopes):
+                print(f"\nAdding photons to microscope {j} ({microscope.observation_face}):")
+                microscope.add_photons_to_image(
+                    self.positions_np, self.directions_np, self.intensities_np,
+                    self.entered_np, self.exited_np, self.last_scatter_pos_np, self.bounces_np
+                )
 
     def init_photons(self, n):
         self.n_photons = n
@@ -368,8 +387,9 @@ class Simulation:
         return lines
 
     def defocus_image(self, i):
-        return self.microscopes[i].form_image_with_defocus(
-            self.positions_np, self.directions_np, self.intensities_np,
-            self.entered_np, self.exited_np, self.last_scatter_pos_np, self.bounces_np
-        )
+        """
+        Get the accumulated defocused image from microscope i.
+        This should be called after simulation_loop() completes.
+        """
+        return self.microscopes[i].get_image().T
 
