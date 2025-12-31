@@ -1,3 +1,4 @@
 *env/
 __pycache__
 /testimages
+/organoid_dataset

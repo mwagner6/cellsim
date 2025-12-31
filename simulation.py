@@ -44,6 +44,81 @@ class Simulation:
             sphere["types"] = [self.typemap[t] for t in sphere["types"]]
         self.spacegen.initSpheres(spheres, self.volume, self.types_ti, self.scatters_ti, self.N)
 
+    def organoidGen(self, center, axes, axis1_dir, axis2_dir, scale_lumen, scale_necrotic, scale_fringe):
+        types = [
+            {"name": "main", "rel_scale": 2, "rel_density": 5, "rel_pigment": 0, "r_index": 0.5},
+            {"name": "necrotic", "rel_scale": 1, "rel_density": 10, "rel_pigment": 0, "r_index": 0.5},
+            {"name": "fringe", "rel_scale": 4, "rel_density": 2.5, "rel_pigment": 0, "r_index": 0.5}
+        ]
+
+        self.init_types(types, 10000)
+
+        organoid = {
+            "center": center,
+            "axes": [],
+            "types": [],
+            "axis1_dir": axis1_dir,
+            "axis2_dir": axis2_dir
+        }
+
+        if scale_fringe > 0:
+            organoid["axes"].append(np.array(axes) * (1 + scale_fringe))
+            organoid["types"].append("fringe")
+        organoid["axes"].append(np.array(axes))
+        organoid["types"].append("main")
+        if scale_necrotic > 0:
+            organoid["axes"].append(np.array(axes) * (1 - scale_necrotic))
+            organoid["types"].append("necrotic")
+        if scale_lumen > 0:
+            organoid["axes"].append(np.array(axes) * scale_lumen)
+            organoid["types"].append("empty")
+
+        self.initEllipsoids([organoid])
+
+    def initEllipsoids(self, ellipsoids):
+        """
+        Initialize ellipsoids with arbitrary orientations in the simulation volume.
+
+        Args:
+            ellipsoids: List of ellipsoid dicts with keys:
+                - "center": [x, y, z] center position
+                - "axes": [[ax1, ay1, az1], [ax2, ay2, az2], ...] semi-axis lengths for each layer
+                  where ax1 is along axis1_dir, ay1 is along axis2_dir, az1 is along axis1 × axis2
+                - "types": [type_name1, type_name2, ...] material type names for each layer
+                - "axis1_dir": [x, y, z] direction vector for first principal axis (optional, default=[1,0,0])
+                - "axis2_dir": [x, y, z] direction vector for second principal axis (optional, default=[0,1,0])
+                  Note: axis2_dir will be orthogonalized to axis1_dir automatically
+
+        Examples:
+            # Axis-aligned ellipsoid (default orientation)
+            sim.initEllipsoids([{
+                "center": [64, 64, 64],
+                "axes": [[20, 15, 10]],  # Semi-axes along x, y, z
+                "types": ["cytoplasm"]
+            }])
+
+            # Tilted ellipsoid (45° in XY plane)
+            sim.initEllipsoids([{
+                "center": [64, 64, 64],
+                "axes": [[30, 15, 10]],
+                "types": ["cytoplasm"],
+                "axis1_dir": [1, 1, 0],  # First axis along diagonal in XY
+                "axis2_dir": [-1, 1, 0]  # Second axis perpendicular to first
+            }])
+
+            # Multi-layer with orientation
+            sim.initEllipsoids([{
+                "center": [40, 40, 40],
+                "axes": [[8, 8, 8], [15, 12, 10]],
+                "types": ["nucleus", "cytoplasm"],
+                "axis1_dir": [1, 0, 1],  # Tilted in XZ plane
+                "axis2_dir": [0, 1, 0]
+            }])
+        """
+        for ellipsoid in ellipsoids:
+            ellipsoid["types"] = [self.typemap[t] for t in ellipsoid["types"]]
+        self.spacegen.initEllipsoids(ellipsoids, self.volume, self.types_ti, self.scatters_ti, self.N)
+
     def project_volume(self, axes):
         outputs = {}
         volume_np = self.volume.to_numpy()
