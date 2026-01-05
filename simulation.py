@@ -20,7 +20,12 @@ class Simulation:
         self.wavelength = wavelength
         self.photons_left = n_photons
 
-        ti.init(ti.gpu)
+        # Initialize Taichi only if not already initialized
+        try:
+            ti.init(ti.gpu)
+        except Exception:
+            # Already initialized, continue
+            pass
 
         # Keep volume-related as fields since they're accessed via self in kernels
         self.volume = ti.field(dtype=ti.u16, shape=self.volume_shape)

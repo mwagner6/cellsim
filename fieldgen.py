@@ -16,7 +16,7 @@ class VolumeGenerator:
         self.A_MELANIN = 6.49E7
         self.B_MELANIN = 3.48
 
-        self.A_SCAT_1UM = 0.005
+        self.A_SCAT_1UM = 0.002
         self.B_SCAT = 1.5
 
         self.A_ANISO_1UM = 0.90
